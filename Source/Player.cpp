@@ -310,6 +310,12 @@ void CPlayerWeenie::LoginCharacter(void)
 
 void CPlayerWeenie::ExitPortal()
 {
+	if (_isFirstPortalInSession)
+	{
+		TryToUnloadAllegianceXP(true);
+		_isFirstPortalInSession = false;
+	}
+
 	if (_phys_obj)
 		_phys_obj->ExitPortal();
 }
@@ -430,8 +436,8 @@ void CPlayerWeenie::UpdateVitaeEnchantment()
 void CPlayerWeenie::OnGivenXP(long long amount, bool allegianceXP)
 {
 	if (m_Qualities.GetVitaeValue() < 1.0 && !allegianceXP)
-	{
-		DWORD64 vitae_pool = InqIntQuality(VITAE_CP_POOL_INT, 0) + min(amount, 1000000000);
+	{	
+		DWORD64 vitae_pool = InqIntQuality(VITAE_CP_POOL_INT, 0) + min((amount * g_pConfig->VitaeXPMultiplier()), 1000000000);
 		float new_vitae = 1.0;		
 		bool has_new_vitae = VitaeSystem::DetermineNewVitaeLevel(m_Qualities.GetVitaeValue(), InqIntQuality(DEATH_LEVEL_INT, 1), &vitae_pool, &new_vitae);
 
@@ -472,7 +478,8 @@ void CPlayerWeenie::CalculateAndDropDeathItems(CCorpseWeenie *pCorpse)
 		return;
 
 	int level = InqIntQuality(LEVEL_INT, 1);
-	int amountOfItemsToDrop = max(floor((float)level / 10.0), 1);
+	int maxItemsToDrop = 12; // Limit the amount of items that can be dropped + random adjustment
+	int amountOfItemsToDrop = min(max(level / 10, 1), maxItemsToDrop);
 	if (level > 10)
 		amountOfItemsToDrop += Random::GenUInt(0, 2);
 
@@ -575,7 +582,16 @@ void CPlayerWeenie::CalculateAndDropDeathItems(CCorpseWeenie *pCorpse)
 		{
 			CWeenieObject *itemToDrop = highestValueOwner->rbegin()->second;
 			highestValueOwner->erase(--highestValueOwner->end());
-			FinishMoveItemToContainer(itemToDrop, pCorpse, 0, true, true);
+
+			if (itemToDrop->InqIntQuality(STACK_SIZE_INT, 1) > 1)
+			{
+				//stackable items drop only a single unit, 
+				//this replicates retail where stacked items count as the value of the full stack but only a single unit will drop if it is selected.
+				itemToDrop->DecrementStackNum();
+				pCorpse->SpawnCloneInContainer(itemToDrop, 1);
+			}
+			else
+				FinishMoveItemToContainer(itemToDrop, pCorpse, 0, true, true);
 			itemsLost++;
 			itemDropCountByCategory[itemToDrop->InqType()]++;
 
@@ -586,15 +602,15 @@ void CPlayerWeenie::CalculateAndDropDeathItems(CCorpseWeenie *pCorpse)
 			else
 				itemsLostText.append("your ");
 			int stackSize = itemToDrop->InqIntQuality(STACK_SIZE_INT, 1);
-			if (stackSize > 1)
-			{
-				std::string pluralName = itemToDrop->GetPluralName();
-				if(pluralName.empty())
-					std::string pluralName = csprintf("%ss", itemToDrop->GetName().c_str());
-				itemsLostText.append(csprintf("%s %s", FormatNumberString(stackSize).c_str(), pluralName.c_str()));
-			}
-			else
-				itemsLostText.append(itemToDrop->GetName());
+			//if (stackSize > 1)
+			//{
+			//	std::string pluralName = itemToDrop->GetPluralName();
+			//	if(pluralName.empty())
+			//		std::string pluralName = csprintf("%ss", itemToDrop->GetName().c_str());
+			//	itemsLostText.append(csprintf("%s %s", FormatNumberString(stackSize).c_str(), pluralName.c_str()));
+			//}
+			//else
+			itemsLostText.append(itemToDrop->GetName());
 		}
 		else
 			break; //we're out of items to drop!
@@ -633,6 +649,14 @@ void CPlayerWeenie::OnDeath(DWORD killer_id)
 	m_Qualities.SetInt(DEATH_LEVEL_INT, m_Qualities.GetInt(LEVEL_INT, 1));
 	NotifyIntStatUpdated(DEATH_LEVEL_INT, true);
 
+	if ((m_Position.objcell_id & 0xFFFF) < 0x100) //outdoors
+	{
+		m_Qualities.SetPosition(LAST_OUTSIDE_DEATH_POSITION, m_Position);
+		NotifyPositionStatUpdated(LAST_OUTSIDE_DEATH_POSITION, true);
+	}
+
+	double PreDeathVitaeValue = m_Qualities.GetVitaeValue();
+
 	UpdateVitaePool(0);
 	ReduceVitae(0.05f);
 	UpdateVitaeEnchantment();
@@ -643,6 +667,15 @@ void CPlayerWeenie::OnDeath(DWORD killer_id)
 		{
 			if (IsPK() && pKiller->_IsPlayer())
 			{
+				if(PreDeathVitaeValue >= 1.0 || g_pConfig->EnablePKTrophyWithVitae())
+				{
+					if (g_pConfig->PKTrophyID(level) > 0)
+					{
+						CWeenieObject *pktrophyitem = g_pWeenieFactory->CreateWeenieByClassID(g_pConfig->PKTrophyID(level), NULL, true);
+						(pKiller->AsContainer())->SpawnInContainer(pktrophyitem);
+					}
+				}
+
 				m_Qualities.SetFloat(PK_TIMESTAMP_FLOAT, Timer::cur_time + g_pConfig->PKRespiteTime());
 				m_Qualities.SetInt(PLAYER_KILLER_STATUS_INT, PKStatusEnum::NPK_PKStatus);
 				NotifyIntStatUpdated(PLAYER_KILLER_STATUS_INT, false);
@@ -2087,6 +2120,7 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 	{
 		for each (TYPEMod<STypeInt, int> intMod in op->_mods[index]._intMod)
 		{
+			bool applyToCreatedItem = false;
 			CWeenieObject *modificationSource = NULL;
 			switch (intMod._unk) //this is a guess
 			{
@@ -2096,6 +2130,11 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 			case 1:
 				modificationSource = pTool;
 				break;
+			case 60:
+				//dying armor entries have a second entry to armor reduction that has -30 armor and _unk value of 60
+				//not sure what to do with that so we skip it.
+				continue;
+				break;
 			default:
 #ifdef _DEBUG
 				assert(false);
@@ -2103,7 +2142,7 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 				break; //should never happen
 			}
 
-			int value = pTarget->InqIntQuality(intMod._stat, 0);
+			int value = pTarget->InqIntQuality(intMod._stat, 0, true);
 			switch (intMod._operationType)
 			{
 			case 1: //=
@@ -2111,12 +2150,15 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 				break;
 			case 2: //+
 				value += intMod._value;
+				if (value < 0)
+					value = 0;
 				break;
 			case 3: //copy value from modificationSource to target
 				if(modificationSource)
 					value = modificationSource->InqIntQuality(intMod._stat, 0);
 				break;
 			case 4: //copy value from modificationSource to created item
+				applyToCreatedItem = true;
 				if (modificationSource)
 					value = modificationSource->InqIntQuality(intMod._stat, 0);
 				break;
@@ -2135,8 +2177,16 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 				break;
 			}
 
-			pTarget->m_Qualities.SetInt(intMod._stat, value);
-			pTarget->NotifyIntStatUpdated(intMod._stat, false);
+			if (pCreatedItem && applyToCreatedItem)
+			{
+				pCreatedItem->m_Qualities.SetInt(intMod._stat, value);
+				pCreatedItem->NotifyIntStatUpdated(intMod._stat, false);
+			}
+			else
+			{
+				pTarget->m_Qualities.SetInt(intMod._stat, value);
+				pTarget->NotifyIntStatUpdated(intMod._stat, false);
+			}
 		}
 	}
 
@@ -2144,6 +2194,7 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 	{
 		for each (TYPEMod<STypeBool, BOOL> boolMod in op->_mods[index]._boolMod)
 		{
+			bool applyToCreatedItem = false;
 			CWeenieObject *modificationSource = NULL;
 			switch (boolMod._unk) //this is a guess
 			{
@@ -2174,6 +2225,7 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 					value = modificationSource->InqBoolQuality(boolMod._stat, 0);
 				break;
 			case 4: //copy value from modificationSource to created item
+				applyToCreatedItem = true;
 				if (modificationSource)
 					value = modificationSource->InqBoolQuality(boolMod._stat, 0);
 				break;
@@ -2189,8 +2241,16 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 				break;
 			}
 
-			pTarget->m_Qualities.SetBool(boolMod._stat, value);
-			pTarget->NotifyBoolStatUpdated(boolMod._stat, false);
+			if (pCreatedItem && applyToCreatedItem)
+			{
+				pCreatedItem->m_Qualities.SetBool(boolMod._stat, value);
+				pCreatedItem->NotifyBoolStatUpdated(boolMod._stat, false);
+			}
+			else
+			{
+				pTarget->m_Qualities.SetBool(boolMod._stat, value);
+				pTarget->NotifyBoolStatUpdated(boolMod._stat, false);
+			}
 		}
 	}
 
@@ -2198,6 +2258,7 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 	{
 		for each (TYPEMod<STypeFloat, double> floatMod in op->_mods[index]._floatMod)
 		{
+			bool applyToCreatedItem = false;
 			CWeenieObject *modificationSource = NULL;
 			switch (floatMod._unk) //this is a guess
 			{
@@ -2214,7 +2275,7 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 				break; //should never happen
 			}
 
-			double value = pTarget->InqFloatQuality(floatMod._stat, 0);
+			double value = pTarget->InqFloatQuality(floatMod._stat, 0, true);
 			switch (floatMod._operationType)
 			{
 			case 1: //=
@@ -2222,12 +2283,15 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 				break;
 			case 2: //+
 				value += floatMod._value;
+				if (value < 0.0)
+					value = 0.0;
 				break;
 			case 3: //copy value from modificationSource to target
 				if (modificationSource)
 					value = modificationSource->InqFloatQuality(floatMod._stat, 0);
 				break;
 			case 4: //copy value from modificationSource to created item
+				applyToCreatedItem = true;
 				if (modificationSource)
 					value = modificationSource->InqFloatQuality(floatMod._stat, 0);
 				break;
@@ -2243,8 +2307,16 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 				break;
 			}
 
-			pTarget->m_Qualities.SetFloat(floatMod._stat, value);
-			pTarget->NotifyFloatStatUpdated(floatMod._stat, false);
+			if (pCreatedItem && applyToCreatedItem)
+			{
+				pCreatedItem->m_Qualities.SetFloat(floatMod._stat, value);
+				pCreatedItem->NotifyFloatStatUpdated(floatMod._stat, false);
+			}
+			else
+			{
+				pTarget->m_Qualities.SetFloat(floatMod._stat, value);
+				pTarget->NotifyFloatStatUpdated(floatMod._stat, false);
+			}
 		}
 	}
 
@@ -2252,6 +2324,7 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 	{
 		for each (TYPEMod<STypeString, std::string> stringMod in op->_mods[index]._stringMod)
 		{
+			bool applyToCreatedItem = false;
 			CWeenieObject *modificationSource = NULL;
 			switch (stringMod._unk) //this is a guess
 			{
@@ -2285,17 +2358,30 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 					case TINKER_NAME_STRING:
 					case IMBUER_NAME_STRING:
 					case CRAFTSMAN_NAME_STRING:
-						value = modificationSource->InqStringQuality(NAME_STRING, "");
+						value = this->InqStringQuality(NAME_STRING, "");
 						break;
 					default:
-						value = modificationSource->InqStringQuality(stringMod._stat, 0);
+						value = modificationSource->InqStringQuality(stringMod._stat, "");
 						break;
 					}
 				}
 				break;
 			case 4: //copy value from modificationSource to created item
+				applyToCreatedItem = true;
 				if (modificationSource)
-					value = modificationSource->InqStringQuality(stringMod._stat, 0);
+				{
+					switch (stringMod._stat)
+					{
+					case TINKER_NAME_STRING:
+					case IMBUER_NAME_STRING:
+					case CRAFTSMAN_NAME_STRING:
+						value = this->InqStringQuality(NAME_STRING, "");
+						break;
+					default:
+						value = modificationSource->InqStringQuality(stringMod._stat, "");
+						break;
+					}
+				}
 				break;
 			case 7: //add spell
 #ifdef _DEBUG
@@ -2309,8 +2395,16 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 				break;
 			}
 
-			pTarget->m_Qualities.SetString(stringMod._stat, value);
-			pTarget->NotifyStringStatUpdated(stringMod._stat, false);
+			if (pCreatedItem && applyToCreatedItem)
+			{
+				pCreatedItem->m_Qualities.SetString(stringMod._stat, value);
+				pCreatedItem->NotifyStringStatUpdated(stringMod._stat, false);
+			}
+			else
+			{
+				pTarget->m_Qualities.SetString(stringMod._stat, value);
+				pTarget->NotifyStringStatUpdated(stringMod._stat, false);
+			}
 		}
 	}
 
@@ -2318,6 +2412,7 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 	{
 		for each (TYPEMod<STypeDID, DWORD> didMod in op->_mods[index]._didMod)
 		{
+			bool applyToCreatedItem = false;
 			CWeenieObject *modificationSource = NULL;
 			switch (didMod._unk) //this is a guess
 			{
@@ -2348,6 +2443,7 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 					value = modificationSource->InqDIDQuality(didMod._stat, 0);
 				break;
 			case 4: //copy value from modificationSource to created item
+				applyToCreatedItem = true;
 				if (modificationSource)
 					value = modificationSource->InqDIDQuality(didMod._stat, 0);
 				break;
@@ -2363,8 +2459,16 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 				break;
 			}
 
-			pTarget->m_Qualities.SetDataID(didMod._stat, value);
-			pTarget->NotifyDIDStatUpdated(didMod._stat, false);
+			if (pCreatedItem && applyToCreatedItem)
+			{
+				pCreatedItem->m_Qualities.SetDataID(didMod._stat, value);
+				pCreatedItem->NotifyDIDStatUpdated(didMod._stat, false);
+			}
+			else
+			{
+				pTarget->m_Qualities.SetDataID(didMod._stat, value);
+				pTarget->NotifyDIDStatUpdated(didMod._stat, false);
+			}
 		}
 	}
 
@@ -2372,6 +2476,7 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 	{
 		for each (TYPEMod<STypeIID, DWORD> iidMod in op->_mods[index]._iidMod)
 		{
+			bool applyToCreatedItem = false;
 			CWeenieObject *modificationSource = NULL;
 			switch (iidMod._unk) //this is a guess
 			{
@@ -2404,7 +2509,7 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 					{
 					case ALLOWED_WIELDER_IID:
 					case ALLOWED_ACTIVATOR_IID:
-						value = modificationSource->GetID();
+						value = this->GetID();
 						break;
 					default:
 						value = modificationSource->InqIIDQuality(iidMod._stat, 0);
@@ -2413,8 +2518,20 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 				}
 				break;
 			case 4: //copy value from modificationSource to created item
+				applyToCreatedItem = true;
 				if (modificationSource)
-					value = modificationSource->InqIIDQuality(iidMod._stat, 0);
+				{
+					switch (iidMod._stat)
+					{
+					case ALLOWED_WIELDER_IID:
+					case ALLOWED_ACTIVATOR_IID:
+						value = this->GetID();
+						break;
+					default:
+						value = modificationSource->InqIIDQuality(iidMod._stat, 0);
+						break;
+					}
+				}
 				break;
 			case 7: //add spell
 #ifdef _DEBUG
@@ -2428,8 +2545,16 @@ void CPlayerWeenie::PerformUseModifications(int index, CCraftOperation *op, CWee
 				break;
 			}
 
-			pTarget->m_Qualities.SetInstanceID(iidMod._stat, value);
-			pTarget->NotifyIIDStatUpdated(iidMod._stat, false);
+			if (pCreatedItem && applyToCreatedItem)
+			{
+				pCreatedItem->m_Qualities.SetInstanceID(iidMod._stat, value);
+				pCreatedItem->NotifyIIDStatUpdated(iidMod._stat, false);
+			}
+			else
+			{
+				pTarget->m_Qualities.SetInstanceID(iidMod._stat, value);
+				pTarget->NotifyIIDStatUpdated(iidMod._stat, false);
+			}
 		}
 	}
 
@@ -2735,6 +2860,7 @@ bool CPlayerWeenie::SpawnSalvageBagInContainer(MaterialType material, int amount
 		return false;
 
 	CWeenieObject *weenie = g_pWeenieFactory->CreateWeenieByClassID(salvageWcid, NULL, false);
+	weenie->m_Qualities.SetString(NAME_STRING, "Salvage"); //modern client prepends the salvage type automatically so we need to adapt to this.
 
 	if (!weenie)
 		return false;
@@ -2749,6 +2875,22 @@ bool CPlayerWeenie::SpawnSalvageBagInContainer(MaterialType material, int amount
 
 void CPlayerWeenie::SetLoginPlayerQualities()
 {
+	//Temporary as a way to fix existing characters
+	if (m_Qualities._skillStatsTable)
+	{
+		for (PackableHashTableWithJson<STypeSkill, Skill>::iterator entry = m_Qualities._skillStatsTable->begin(); entry != m_Qualities._skillStatsTable->end(); entry++)
+		{
+			Skill skill = entry->second;
+			if (skill._sac == SKILL_ADVANCEMENT_CLASS::SPECIALIZED_SKILL_ADVANCEMENT_CLASS)
+				m_Qualities.SetSkillLevel(entry->first, 10);
+			else if (skill._sac == SKILL_ADVANCEMENT_CLASS::TRAINED_SKILL_ADVANCEMENT_CLASS)
+				m_Qualities.SetSkillLevel(entry->first, 5);
+			else
+				m_Qualities.SetSkillLevel(entry->first, 0);
+		}
+	}
+	//End of temporary code
+
 	g_pAllegianceManager->SetWeenieAllegianceQualities(this);
 	m_Qualities.SetFloat(LOGIN_TIMESTAMP_FLOAT, Timer::cur_time);
 
@@ -2810,11 +2952,17 @@ void CPlayerWeenie::SetLoginPlayerQualities()
 	{
 		m_Qualities.SetBool(IS_ADMIN_BOOL, TRUE);
 		m_Qualities.SetBool(IS_ARCH_BOOL, TRUE);
+
+		m_Qualities.SetBool(SPELL_COMPONENTS_REQUIRED_BOOL, FALSE);
+		m_Qualities.SetInt(BONDED_INT, 1); //do not drop items on death
 	}
 	else
 	{
 		m_Qualities.RemoveBool(IS_ADMIN_BOOL);
 		m_Qualities.RemoveBool(IS_ARCH_BOOL);
+
+		m_Qualities.SetBool(SPELL_COMPONENTS_REQUIRED_BOOL, TRUE);
+		m_Qualities.SetInt(BONDED_INT, 0); //drop items on death
 	}
 
 	for (auto wielded : m_Wielded)
@@ -2840,14 +2988,12 @@ void CPlayerWeenie::SetLoginPlayerQualities()
 		m_Qualities.SetBool(FIRST_ENTER_WORLD_DONE_BOOL, TRUE);
 	}
 
-	DWORD houseId = InqIIDQuality(HOUSE_IID, 0);
-	if (CWeenieObject *houseWeenie = g_pWorld->FindObject(houseId, true))
+	//check if we still own our house.	
+	if (DWORD houseId = InqDIDQuality(HOUSEID_DID, 0))
 	{
-		if (CHouseWeenie *house = houseWeenie->AsHouse())
-		{			
-			if (CSlumLordWeenie *slumlord = house->GetSlumLord())
-				slumlord->UpdateHouseData(this);
-		}
+		CHouseData *houseData = g_pHouseManager->GetHouseData(houseId);
+		if (houseData->_ownerId != GetID())
+			m_Qualities.SetDataID(HOUSEID_DID, 0);
 	}
 }
 
@@ -3022,6 +3168,8 @@ void CWandSpellUseEvent::OnReadyToUse()
 		_newManaValue = itemCurrentMana - manaCost;
 	}
 
+	_weenie->MakeSpellcastingManager()->m_bCasting = true;
+
 	if (motion)
 		ExecuteUseAnimation(motion);
 	else
@@ -3045,6 +3193,20 @@ void CWandSpellUseEvent::OnUseAnimSuccess(DWORD motion)
 	_weenie->MakeSpellcastingManager()->CastSpellInstant(_targetId, _spellId);
 	_weenie->DoForcedStopCompletely();
 	Done();
+}
+
+void CWandSpellUseEvent::Cancel(DWORD error)
+{
+	_weenie->MakeSpellcastingManager()->m_bCasting = false;
+
+	CUseEventData::Cancel(error);
+}
+
+void CWandSpellUseEvent::Done(DWORD error)
+{
+	_weenie->MakeSpellcastingManager()->m_bCasting = false;
+
+	CUseEventData::Done(error);
 }
 
 void CLifestoneRecallUseEvent::OnReadyToUse()
@@ -3130,4 +3292,29 @@ void CPlayerWeenie::OnTeleported()
 {
 	CWeenieObject::OnTeleported();
 	_recallTime = -1.0; // cancel any teleport
+}
+
+DWORD CPlayerWeenie::GetAccountHouseId()
+{
+	DWORD currentCharacterId = GetID();
+	for (auto &character : GetClient()->GetCharacters())
+	{
+		if (character.weenie_id == currentCharacterId)
+		{
+			if (DWORD houseID = InqDIDQuality(HOUSEID_DID, 0))
+				return houseID;
+		}
+		else
+		{
+			CWeenieObject *otherCharacter = CWeenieObject::Load(character.weenie_id);
+			if (DWORD houseID = otherCharacter->InqDIDQuality(HOUSEID_DID, 0))
+			{
+				delete otherCharacter;
+				return houseID;
+			}
+			delete otherCharacter;
+		}
+	}
+
+	return 0;
 }

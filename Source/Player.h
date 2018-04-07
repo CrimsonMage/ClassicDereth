@@ -164,6 +164,7 @@ public:
 	virtual void OnTeleported() override;
 
 	CCorpseWeenie *_pendingCorpse = NULL;
+	DWORD GetAccountHouseId();
 
 protected:
 	CClient *m_pClient;
@@ -176,6 +177,7 @@ protected:
 	double _logoutTime = -1.0;
 	double _recallTime = -1.0;
 	Position _recallPos;
+	bool _isFirstPortalInSession = true;
 };
 
 class CWandSpellUseEvent : public CUseEventData
@@ -189,6 +191,8 @@ public:
 	CWandSpellUseEvent(DWORD wandId, DWORD targetId);
 	virtual void OnReadyToUse() override;
 	virtual void OnUseAnimSuccess(DWORD motion) override;
+	virtual void Cancel(DWORD error = 0) override;
+	virtual void Done(DWORD error = 0) override;
 };
 
 class CLifestoneRecallUseEvent : public CUseEventData

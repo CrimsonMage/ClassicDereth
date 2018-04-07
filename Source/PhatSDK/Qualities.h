@@ -335,7 +335,9 @@ struct EnchantedQualityDetails
 		enchantedValue *= valueIncreasingMultiplier;
 		enchantedValue *= valueDecreasingMultiplier;
 		enchantedValue += valueIncreasingAdditive;
-		enchantedValue -= valueDecreasingAdditive;
+		enchantedValue += valueDecreasingAdditive;
+
+		enchantedValue = max(enchantedValue, 0.0);
 
 		CalculateIncreasingEnchantedValue();
 		CalculateDecreasingEnchantedValue();
@@ -345,7 +347,9 @@ struct EnchantedQualityDetails
 	{
 		enchantedValue_DecreasingOnly = rawValue;
 		enchantedValue_DecreasingOnly *= valueDecreasingMultiplier;
-		enchantedValue_DecreasingOnly -= valueDecreasingAdditive;
+		enchantedValue_DecreasingOnly += valueDecreasingAdditive;
+
+		enchantedValue_DecreasingOnly = max(enchantedValue_DecreasingOnly, 0.0);
 	}
 
 	void CalculateIncreasingEnchantedValue()
@@ -353,6 +357,8 @@ struct EnchantedQualityDetails
 		enchantedValue_IncreasingOnly = rawValue;
 		enchantedValue_IncreasingOnly *= valueIncreasingMultiplier;
 		enchantedValue_IncreasingOnly += valueIncreasingAdditive;
+
+		enchantedValue_IncreasingOnly = max(enchantedValue_IncreasingOnly, 0.0);
 	}
 };
 
@@ -401,6 +407,7 @@ public:
 	BOOL UpdateEnchantment(Enchantment *to_update);
 
 	static BOOL Enchant(PackableListWithJson<Enchantment> *affecting, EnchantedQualityDetails *val);
+	BOOL GetBodyArmorEnchantmentDetails(unsigned int part, DAMAGE_TYPE dt, EnchantedQualityDetails *val);
 	BOOL GetIntEnchantmentDetails(unsigned int stype, EnchantedQualityDetails *val);
 	BOOL GetFloatEnchantmentDetails(unsigned int stype, EnchantedQualityDetails *val);
 
@@ -664,6 +671,7 @@ public:
 	BOOL InqVitae(Enchantment *vitae);
 	double GetVitaeValue();
 
+	BOOL GetBodyArmorEnchantmentDetails(unsigned int part, DAMAGE_TYPE dt, EnchantedQualityDetails *val); // custom, implied
 	BOOL GetIntEnchantmentDetails(unsigned int stype, EnchantedQualityDetails *val); // custom, implied
 	BOOL GetFloatEnchantmentDetails(unsigned int stype, EnchantedQualityDetails *val);
 

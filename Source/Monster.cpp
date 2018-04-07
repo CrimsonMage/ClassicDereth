@@ -463,7 +463,7 @@ void CMonsterWeenie::FinishMoveItemToContainer(CWeenieObject *sourceItem, CConta
 	// 4. Item being stored is in an external container (chest) or being moved to an external container (chest)
 
 	bool wasWielded = sourceItem->IsWielded();
-	bool wasInWorld = (GetBlock() != NULL);
+	bool isPickup = sourceItem->GetWorldTopLevelOwner() != this;
 
 	DWORD dwCell = GetLandcell();
 
@@ -490,7 +490,7 @@ void CMonsterWeenie::FinishMoveItemToContainer(CWeenieObject *sourceItem, CConta
 			EmitSound(Sound_PickUpItem, 1.0f);
 	}
 
-	if (wasInWorld)
+	if (isPickup)
 		sourceItem->OnPickedUp(this);
 
 	if (bSendEvent)
@@ -601,6 +601,8 @@ void CMonsterWeenie::FinishMoveItemTo3D(CWeenieObject *sourceItem)
 	if (bWasWielded && get_minterp()->InqStyle() != Motion_NonCombat)
 		AdjustToNewCombatMode();
 
+	if(bWasWielded)
+		sourceItem->OnUnwield(this);
 	sourceItem->OnDropped(this);
 }
 
@@ -655,7 +657,7 @@ bool CMonsterWeenie::FinishMoveItemToWield(CWeenieObject *sourceItem, DWORD targ
 	// 2. Item being equipped from different equip slot.
 	// 3. Item being equipped from the player's inventory.
 
-	bool wasInWorld = (GetBlock() != NULL);
+	bool isPickup = sourceItem->GetWorldTopLevelOwner() != this;
 
 	int error = CheckWieldRequirements(sourceItem, this, WIELD_REQUIREMENTS_INT, WIELD_SKILLTYPE_INT, WIELD_DIFFICULTY_INT);
 	if (error != WERROR_NONE)
@@ -734,6 +736,17 @@ bool CMonsterWeenie::FinishMoveItemToWield(CWeenieObject *sourceItem, DWORD targ
 	{
 		bool bShouldCast = true;
 
+		std::string name;
+		if (sourceItem->m_Qualities.InqString(CRAFTSMAN_NAME_STRING, name))
+		{
+			if (!name.empty() && name != InqStringQuality(NAME_STRING, ""))
+			{
+				bShouldCast = false;
+
+				NotifyWeenieErrorWithString(WERROR_ACTIVATION_NOT_CRAFTSMAN, name.c_str());
+			}
+		}
+
 		int difficulty;
 		difficulty = 0;
 		if (sourceItem->m_Qualities.InqInt(ITEM_DIFFICULTY_INT, difficulty, TRUE, FALSE))
@@ -808,7 +821,7 @@ bool CMonsterWeenie::FinishMoveItemToWield(CWeenieObject *sourceItem, DWORD targ
 		}
 	}
 
-	if(wasInWorld)
+	if(isPickup)
 		sourceItem->OnPickedUp(this);
 	sourceItem->OnWield(this);
 	return true;
@@ -1271,7 +1284,7 @@ void CMonsterWeenie::FinishGiveItem(CContainerWeenie *targetContainer, CWeenieOb
 		{
 			if (newStackItem == sourceItem)
 			{
-				SendNetMessage(InventoryMove(sourceItem->GetID(), targetContainer->GetID(), 0, 0), PRIVATE_MSG, TRUE);
+				SendNetMessage(InventoryMove(sourceItem->GetID(), targetContainer->GetID(), 0, sourceItem->RequiresPackSlot() ? 1 : 0), PRIVATE_MSG, TRUE);
 			}
 
 			if (!InqBoolQuality(NPC_INTERACTS_SILENTLY_BOOL, FALSE) && !topLevelOwner->InqBoolQuality(NPC_INTERACTS_SILENTLY_BOOL, FALSE))
@@ -1602,7 +1615,7 @@ void CMonsterWeenie::DropAllLoot(CCorpseWeenie *pCorpse)
 void CMonsterWeenie::GenerateDeathLoot(CCorpseWeenie *pCorpse)
 {
 	if (m_Qualities._create_list)
-		g_pWeenieFactory->AddFromCreateList(pCorpse, m_Qualities._create_list, (DestinationType)(Contain_DestinationType | ContainTreasure_DestinationType));
+		g_pWeenieFactory->AddFromCreateList(pCorpse, m_Qualities._create_list, (DestinationType)(Contain_DestinationType | Treasure_DestinationType));
 
 	if (DWORD deathTreasureType = InqDIDQuality(DEATH_TREASURE_TYPE_DID, 0))
 		g_pWeenieFactory->GenerateFromTypeOrWcid(pCorpse, DestinationType::ContainTreasure_DestinationType, deathTreasureType);
@@ -2188,37 +2201,26 @@ float CMonsterWeenie::GetEffectiveArmorLevel(DamageEventData &damageData, bool b
 	std::list<CWeenieObject *> wielded;
 	Container_GetWieldedByMask(wielded, ARMOR_LOC|CLOTHING_LOC|SHIELD_LOC);
 
-	//body
-	float armorLevel = CWeenieObject::GetEffectiveArmorLevel(damageData, bIgnoreMagicArmor);
+	EnchantedQualityDetails buffDetails;
 
 	//body part
-	int bodyPartArmor = 0;
-	m_Qualities.InqBodyArmorValue(damageData.hitPart, damageData.damage_type, bodyPartArmor, true);
+	GetBodyArmorEnchantmentDetails(damageData.hitPart, damageData.damage_type, &buffDetails);
 
-	EnchantedQualityDetails buffDetails;
-	GetIntEnchantmentDetails(ARMOR_LEVEL_INT, 0, &buffDetails); //body enchantments also affect body parts.
-	buffDetails.rawValue = bodyPartArmor; //overwrite armor level with the body part armor level for these calculations.
-	buffDetails.CalculateEnchantedValue();
-
-	if (damageData.isArmorRending && damageData.rendingMultiplier < buffDetails.valueDecreasingMultiplier)
-	{
-		//our armor rending is better than the debuffs applied, replace debuffs with rending.
-		buffDetails.valueDecreasingMultiplier = damageData.rendingMultiplier;
-		buffDetails.CalculateEnchantedValue();
-	}
-
-	if (bIgnoreMagicArmor)
-		armorLevel += buffDetails.enchantedValue_DecreasingOnly; //debuffs still count
-	else
-		armorLevel += buffDetails.enchantedValue;
+	//body
+	buffDetails.rawValue += CWeenieObject::GetEffectiveArmorLevel(damageData, bIgnoreMagicArmor);
 
 	//equipment
 	for (auto item : wielded)
-	{
-		armorLevel += item->GetEffectiveArmorLevel(damageData, bIgnoreMagicArmor);
-	}
+		buffDetails.rawValue += item->GetEffectiveArmorLevel(damageData, bIgnoreMagicArmor);
 
-	return armorLevel;
+	if (damageData.isArmorRending && damageData.armorRendingMultiplier < buffDetails.valueDecreasingMultiplier)
+		buffDetails.valueDecreasingMultiplier = damageData.armorRendingMultiplier;
+	buffDetails.CalculateEnchantedValue();
+
+	if (bIgnoreMagicArmor)
+		return buffDetails.rawValue;
+	else
+		return buffDetails.enchantedValue;
 }
 
 void CMonsterWeenie::TryMeleeAttack(DWORD target_id, ATTACK_HEIGHT height, float power, DWORD motion)

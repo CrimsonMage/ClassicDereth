@@ -80,20 +80,11 @@ void CPortal::CheckedTeleport(CWeenieObject *pOther)
 		}
 		else if (maxLevel && currentLevel > maxLevel)
 		{
-			pOther->SendText("You too powerful to use this portal.", LTT_MAGIC);
+			pOther->SendText("You are too powerful to use this portal.", LTT_MAGIC);
 		}
 		else
 		{
 			Teleport(pOther);
-
-			std::string questString;
-			if (m_Qualities.InqString(QUEST_STRING, restriction))
-			{
-				if (CPlayerWeenie *player = pOther->AsPlayer())
-					player->StampQuest(questString.c_str());
-			}
-
-			ChanceExecuteEmoteSet(pOther->GetID(), Portal_EmoteCategory);
 		}
 	}
 }
@@ -134,6 +125,8 @@ void CPortal::Teleport(CWeenieObject *pTarget)
 				player->StampQuest(questName.c_str());
 			}
 		}
+
+		ChanceExecuteEmoteSet(pTarget->GetID(), Portal_EmoteCategory);
 	}
 	else
 	{

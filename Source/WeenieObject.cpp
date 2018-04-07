@@ -1811,7 +1811,7 @@ DWORD CWeenieObject::GetCostToRaiseSkill(STypeSkill key)
 
 		if (skill._level_from_pp < maxLevel)
 		{
-			DWORD expRequired = ExperienceSystem::ExperienceFromSkillLevel(skill._sac, skill._level_from_pp + 1);
+			DWORD expRequired = ExperienceSystem::ExperienceToSkillLevel(skill._sac, skill._level_from_pp + 1);
 			expRequired -= skill._pp;
 			return expRequired;
 		}
@@ -1927,8 +1927,11 @@ void CWeenieObject::GiveXP(long long amount, bool showText, bool allegianceXP)
 			break;
 	}
 
-	m_Qualities.SetInt64(AVAILABLE_EXPERIENCE_INT64, newAvailableXP);
-	NotifyInt64StatUpdated(AVAILABLE_EXPERIENCE_INT64);
+	if (!(currentLevel == ExperienceSystem::GetMaxLevel() && g_pConfig->DisableUnassignedXPAtMaxLevel()))
+	{
+		m_Qualities.SetInt64(AVAILABLE_EXPERIENCE_INT64, newAvailableXP);
+		NotifyInt64StatUpdated(AVAILABLE_EXPERIENCE_INT64);
+	}
 
 	m_Qualities.SetInt64(TOTAL_EXPERIENCE_INT64, newTotalXP);
 	NotifyInt64StatUpdated(TOTAL_EXPERIENCE_INT64);
@@ -2198,7 +2201,7 @@ DWORD CWeenieObject::GiveSkillPoints(STypeSkill key, DWORD amount)
 
 	skill._level_from_pp += amount;
 
-	skill._pp = ExperienceSystem::ExperienceFromSkillLevel(skill._sac, skill._level_from_pp);
+	skill._pp = ExperienceSystem::ExperienceToSkillLevel(skill._sac, skill._level_from_pp);
 
 	m_Qualities.SetSkill(key, skill);
 
@@ -2357,20 +2360,18 @@ bool CWeenieObject::TeleportToLifestone()
 
 bool CWeenieObject::TeleportToHouse()
 {
-	DWORD houseId = InqIIDQuality(HOUSE_IID, 0);
-	if (CWeenieObject *houseWeenie = g_pWorld->FindObject(houseId, true)) //we may have to activate the landblock the house is in
+	if (CPlayerWeenie *player = AsPlayer())
 	{
-		if (CHouseWeenie *house = houseWeenie->AsHouse())
+		DWORD houseId = player->GetAccountHouseId();
+		if (houseId)
 		{
-			if (house->GetHouseOwner() == GetID())
+			CHouseData *houseData = g_pHouseManager->GetHouseData(houseId);
+			if (houseData->_ownerAccount == player->GetClient()->GetAccountInfo().id)
 			{
-				if (CSlumLordWeenie *slumlord = house->GetSlumLord())
+				if (houseData->_position.objcell_id)
 				{
-					if (slumlord->m_Position.objcell_id)
-					{
-						Movement_Teleport(slumlord->m_Position, false);
-						return true;
-					}
+					Movement_Teleport(houseData->_position, false);
+					return true;
 				}
 			}
 		}
@@ -2393,26 +2394,21 @@ bool CWeenieObject::TeleportToMansion()
 		monarch = CWeenieObject::Load(allegianceNode->_monarchID);
 		if (!monarch)
 			return false;
-		allegianceHouseId = monarch->InqIIDQuality(HOUSE_IID, 0);
+		allegianceHouseId = monarch->InqDIDQuality(HOUSEID_DID, 0);
 		delete monarch;
 	}
 	else
-		allegianceHouseId = monarch->InqIIDQuality(HOUSE_IID, 0);
+		allegianceHouseId = monarch->InqDIDQuality(HOUSEID_DID, 0);
 
-	if (CWeenieObject *houseWeenie = g_pWorld->FindObject(allegianceHouseId, true)) //we may have to activate the landblock the house is in
+	if (allegianceHouseId)
 	{
-		if (CHouseWeenie *house = houseWeenie->AsHouse())
+		CHouseData *houseData = g_pHouseManager->GetHouseData(allegianceHouseId);
+		if (houseData && houseData->_ownerId == allegianceNode->_monarchID && (houseData->_houseType == 2 || houseData->_houseType == 3)) //2 = villa, 3 = mansion
 		{
-			if (house->GetHouseOwner() == allegianceNode->_monarchID && (house->GetHouseType() == 2 || house->GetHouseType() == 3)) //2 = villa, 3 = mansion
+			if (houseData->_position.objcell_id)
 			{
-				if (CSlumLordWeenie *slumlord = house->GetSlumLord())
-				{
-					if (slumlord->m_Position.objcell_id)
-					{
-						Movement_Teleport(slumlord->m_Position, false);
-						return true;
-					}
-				}
+				Movement_Teleport(houseData->_position, false);
+				return true;
 			}
 		}
 	}
@@ -3525,13 +3521,17 @@ bool CWeenieObject::GetIntEnchantmentDetails(STypeInt stype, int defaultValue, E
 	return returnValue;
 }
 
+bool CWeenieObject::GetBodyArmorEnchantmentDetails(unsigned int bodyPart, DAMAGE_TYPE damageType, EnchantedQualityDetails *enchantmentDetails)
+{
+	bool returnValue = m_Qualities.GetBodyArmorEnchantmentDetails(bodyPart, damageType, enchantmentDetails);
+	enchantmentDetails->CalculateEnchantedValue();
+	return returnValue;
+}
+
 void CWeenieObject::TryCancelAttack()
 {
 	if (m_AttackManager)
 		m_AttackManager->Cancel();
-
-	if (m_SpellcastingManager)
-		m_SpellcastingManager->Cancel();
 }
 
 void CWeenieObject::HandleAttackHook(const AttackCone &cone)
@@ -4074,15 +4074,8 @@ float CWeenieObject::GetEffectiveArmorLevel(DamageEventData &damageData, bool bI
 	EnchantedQualityDetails buffDetails;
 	GetIntEnchantmentDetails(ARMOR_LEVEL_INT, 0, &buffDetails);
 
-	if (damageData.isArmorRending && damageData.rendingMultiplier < buffDetails.valueDecreasingMultiplier)
-	{
-		//our armor rending is better than the debuffs applied, replace debuffs with rending.
-		buffDetails.valueDecreasingMultiplier = damageData.rendingMultiplier;
-		buffDetails.CalculateEnchantedValue();
-	}
-
 	if (bIgnoreMagicArmor)
-		armorLevel = buffDetails.enchantedValue_DecreasingOnly; //debuffs still count
+		armorLevel = buffDetails.rawValue;
 	else
 		armorLevel = buffDetails.enchantedValue;
 
@@ -4168,13 +4161,15 @@ void CWeenieObject::TakeDamage(DamageEventData &damageData)
 		buffDetails.CalculateEnchantedValue();
 	}
 
-	float resistanceRegular = buffDetails.enchantedValue;
+	float resistanceRegular;
 	if (damageData.ignoreMagicResist)
-		resistanceRegular = buffDetails.enchantedValue_IncreasingOnly; //debuffs still count
+		resistanceRegular = buffDetails.rawValue;
+	else
+		resistanceRegular = buffDetails.enchantedValue;
 
 	if (damageData.damageAfterMitigation > 0 || damageData.damage_type == HEALTH_DAMAGE_TYPE || damageData.damage_type == STAMINA_DAMAGE_TYPE || damageData.damage_type == MANA_DAMAGE_TYPE)
 	{
-		if (!AsPlayer())
+		if (!AsPlayer() || damageData.ignoreMagicResist)
 			damageData.damageAfterMitigation *= resistanceRegular;
 		else //only players have natural resistances.
 		{
@@ -4199,7 +4194,12 @@ void CWeenieObject::TakeDamage(DamageEventData &damageData)
 
 			//natural resistances only work if they beat the buffed value before any debuffs are applied.
 			if (resistanceNatural < buffDetails.enchantedValue_DecreasingOnly)
-				damageData.damageAfterMitigation *= resistanceNatural;
+			{
+				//replace our buffed value with natural resistances and recalculate.
+				buffDetails.valueDecreasingMultiplier = resistanceNatural;
+				buffDetails.CalculateEnchantedValue();
+				damageData.damageAfterMitigation *= buffDetails.enchantedValue;
+			}
 			else
 				damageData.damageAfterMitigation *= resistanceRegular;
 		}
@@ -4207,8 +4207,6 @@ void CWeenieObject::TakeDamage(DamageEventData &damageData)
 
 	if (!damageData.ignoreArmorEntirely && (damageData.damage_form & DF_PHYSICAL))
 	{
-		GetIntEnchantmentDetails(ARMOR_LEVEL_INT, 0, &buffDetails);
-
 		// calculate armor level
 		double armorLevel = GetEffectiveArmorLevel(damageData, damageData.ignoreMagicArmor);
 
@@ -4224,9 +4222,13 @@ void CWeenieObject::TakeDamage(DamageEventData &damageData)
 	if (damageData.damage_form & DF_MAGIC && damageData.isProjectileSpell)
 	{
 		// check for magic absorption
-		if (CWeenieObject *shield = GetWieldedCombat(COMBAT_USE::COMBAT_USE_SHIELD))
+		CWeenieObject *shieldOrMissileWeapon = GetWieldedCombat(COMBAT_USE::COMBAT_USE_SHIELD);
+		if (!shieldOrMissileWeapon)
+			shieldOrMissileWeapon = GetWieldedCombat(COMBAT_USE::COMBAT_USE_MISSILE);
+
+		if (shieldOrMissileWeapon)
 		{
-			if (shield->GetImbueEffects() & ImbuedEffectType::IgnoreSomeMagicProjectileDamage_ImbuedEffectType)
+			if (shieldOrMissileWeapon->GetImbueEffects() & ImbuedEffectType::IgnoreSomeMagicProjectileDamage_ImbuedEffectType)
 			{
 				// not worrying about if trained or specailized or using shield skill vs magic defense skill for now
 				// RED = 100 % * ((CAP * ST * SKILL * 0.0030) - (CAP * ST *.3))
@@ -4518,7 +4520,31 @@ void CWeenieObject::OnTookDamage(DamageEventData &data)
 			{				
 				// Killer Phyntos Soldier sears you for 46 points with Incantation of Acid Stream.
 				// You chill Killer Phyntos Swarm for 212 points with Halo of Frost II.
-				SendText(csprintf("%s %s you for %d points with %s.", data.GetSourceName().c_str(), plural_adj.c_str(), max(0, data.outputDamageFinal), data.spell_name.c_str()), LTT_MAGIC);
+				switch (data.damage_type)
+				{
+				default:
+					SendText(csprintf("%s %s you for %d points with %s.", data.GetSourceName().c_str(), plural_adj.c_str(), max(0, data.outputDamageFinal), data.spell_name.c_str()), LTT_MAGIC);
+					break;
+				case DAMAGE_TYPE::HEALTH_DAMAGE_TYPE:
+				case DAMAGE_TYPE::STAMINA_DAMAGE_TYPE:
+				case DAMAGE_TYPE::MANA_DAMAGE_TYPE:
+					std::string vitalName;
+					switch (data.damage_type)
+					{
+					case HEALTH_DAMAGE_TYPE:
+						vitalName = "health";
+						break;
+					case STAMINA_DAMAGE_TYPE:
+						vitalName = "stamina";
+						break;
+					case MANA_DAMAGE_TYPE:
+						vitalName = "mana";
+						break;
+					}
+					bool isRestore = (data.outputDamageFinal < 0);
+					SendText(csprintf("%s casts %s and %s %d points of your %s.", data.GetSourceName().c_str(), data.spell_name.c_str(), isRestore ? "restores" : "drains", abs(data.outputDamageFinal), vitalName.c_str()), LTT_MAGIC);
+					break;
+				}
 			}
 		}
 		else if (data.damage_form & DF_IMPACT)
@@ -4587,7 +4613,34 @@ void CWeenieObject::OnDealtDamage(DamageEventData &data)
 			{
 				// Killer Phyntos Soldier sears you for 46 points with Incantation of Acid Stream.
 				// You chill Killer Phyntos Swarm for 212 points with Halo of Frost II.
-				SendText(csprintf("%sYou %s %s for %d points with %s.", data.wasCrit ? "Critical hit! " : "", single_adj.c_str(), data.GetTargetName().c_str(), data.outputDamageFinal, data.spell_name.c_str()), LTT_MAGIC);
+				switch (data.damage_type)
+				{
+				default:
+					SendText(csprintf("%sYou %s %s for %d points with %s.", data.wasCrit ? "Critical hit! " : "", single_adj.c_str(), data.GetTargetName().c_str(), data.outputDamageFinal, data.spell_name.c_str()), LTT_MAGIC);
+					break;
+				case DAMAGE_TYPE::HEALTH_DAMAGE_TYPE:
+				case DAMAGE_TYPE::STAMINA_DAMAGE_TYPE:
+				case DAMAGE_TYPE::MANA_DAMAGE_TYPE:
+					std::string vitalName;
+					switch (data.damage_type)
+					{
+					case HEALTH_DAMAGE_TYPE:
+						vitalName = "health";
+						break;
+					case STAMINA_DAMAGE_TYPE:
+						vitalName = "stamina";
+						break;
+					case MANA_DAMAGE_TYPE:
+						vitalName = "mana";
+						break;
+					}
+					bool isRestore = (data.outputDamageFinal < 0);
+					if(data.target == data.source)
+						SendText(csprintf("%sYou cast %s and %s %d points of your %s.", data.wasCrit ? "Critical hit! " : "", data.spell_name.c_str(), isRestore ? "restore" : "drain", abs(data.outputDamageFinal), vitalName.c_str()), LTT_MAGIC);
+					else
+						SendText(csprintf("%sWith %s you %s %d points of %s %s %s.", data.wasCrit ? "Critical hit! " : "", data.spell_name.c_str(), isRestore ? "restore" : "drain", abs(data.outputDamageFinal), vitalName.c_str(), isRestore ? "to" : "from", data.GetTargetName().c_str()), LTT_MAGIC);
+					break;
+				}
 			}
 		}
 		else if (data.damage_form & DF_IMPACT)
@@ -5333,7 +5386,7 @@ int CWeenieObject::SimulateGiveObject(CContainerWeenie *target_container, CWeeni
 	object_weenie->m_Qualities.SetInstanceID(CONTAINER_IID, target_container->GetID());
 	object_weenie->_cachedHasOwner = true;
 
-	SendNetMessage(InventoryMove(object_weenie->GetID(), target_container->GetID(), 0, 0), PRIVATE_MSG, TRUE);
+	SendNetMessage(InventoryMove(object_weenie->GetID(), target_container->GetID(), 0, object_weenie->RequiresPackSlot() ? 1 : 0), PRIVATE_MSG, TRUE);
 
 	target_container->MakeAware(object_weenie, true);
 	target_container->OnReceiveInventoryItem(this, object_weenie, 0);
@@ -5419,7 +5472,7 @@ void CWeenieObject::SimulateGiveObject(class CContainerWeenie *target_container,
 	object_weenie->m_Qualities.SetInstanceID(CONTAINER_IID, target_container->GetID());
 	object_weenie->_cachedHasOwner = true;
 
-	SendNetMessage(InventoryMove(object_weenie->GetID(), target_container->GetID(), 0, 0), PRIVATE_MSG, TRUE);
+	SendNetMessage(InventoryMove(object_weenie->GetID(), target_container->GetID(), 0, object_weenie->RequiresPackSlot() ? 1 : 0), PRIVATE_MSG, TRUE);
 
 	target_container->MakeAware(object_weenie, true);
 	target_container->OnReceiveInventoryItem(this, object_weenie, 0);
@@ -5507,7 +5560,7 @@ int CWeenieObject::CraftObject(CContainerWeenie *target_container, CWeenieObject
 	object_weenie->m_Qualities.SetInstanceID(CONTAINER_IID, target_container->GetID());
 	object_weenie->_cachedHasOwner = true;
 
-	SendNetMessage(InventoryMove(object_weenie->GetID(), target_container->GetID(), 0, 0), PRIVATE_MSG, TRUE);
+	SendNetMessage(InventoryMove(object_weenie->GetID(), target_container->GetID(), 0, object_weenie->RequiresPackSlot() ? 1 : 0), PRIVATE_MSG, TRUE);
 
 	target_container->MakeAware(object_weenie, true);
 	target_container->OnReceiveInventoryItem(this, object_weenie, 0);
@@ -6300,17 +6353,17 @@ bool CWeenieObject::IsAttunedOrContainsAttuned()
 
 bool CWeenieObject::IsBonded()
 {
-	return InqIntQuality(BONDED_INT, 0) == BONDED_BONDED_STATUS ? true : false;
+	return InqIntQuality(BONDED_INT, 0) == Bonded_BondedStatus ? true : false;
 }
 
 bool CWeenieObject::IsDroppedOnDeath()
 {
-	return InqIntQuality(BONDED_INT, 0) == SLIPPERY_BONDEDS_TATUS ? true : false;
+	return InqIntQuality(BONDED_INT, 0) == Slippery_BondedStatus ? true : false;
 }
 
 bool CWeenieObject::IsDestroyedOnDeath()
 {
-	return InqIntQuality(BONDED_INT, 0) == DESTROY_BONDED_STATUS ? true : false;
+	return InqIntQuality(BONDED_INT, 0) == Destroy_BondedStatus ? true : false;
 }
 
 void CWeenieObject::CheckVitalRanges()

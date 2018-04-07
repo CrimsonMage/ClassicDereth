@@ -18,6 +18,11 @@ void CalculateDamage(DamageEventData *dmgEvent, SpellCastData *spellData)
 	if (!dmgEvent)
 		return;
 
+	dmgEvent->damageBeforeMitigation = dmgEvent->damageAfterMitigation = dmgEvent->baseDamage;
+
+	if (!dmgEvent->source)
+		return;
+
 	CalculateAttributeDamageBonus(dmgEvent);
 	CalculateSkillDamageBonus(dmgEvent, spellData);
 	CalculateCriticalHitData(dmgEvent, spellData);
@@ -57,7 +62,11 @@ void CalculateAttributeDamageBonus(DamageEventData *dmgEvent)
 		else
 			dmgEvent->source->m_Qualities.InqAttribute(STRENGTH_ATTRIBUTE, attrib, FALSE);
 
-		double attribDamageMod = ((int)attrib - 55.0) / 33.0;
+		double attribDamageMod;
+		if(attrib >= 1000000) //this makes /godly characters use the old formula(huge damage!)
+			attribDamageMod = ((int)attrib - 55.0) / 33.0;
+		else
+			attribDamageMod = 6.75*(1.0 - exp(-0.005*((int)attrib - 55)));
 		if (attribDamageMod < 0)
 			dmgEvent->attributeDamageBonus = dmgEvent->baseDamage * (attribDamageMod / 2.0);
 		else
@@ -72,6 +81,8 @@ void CalculateAttributeDamageBonus(DamageEventData *dmgEvent)
 void CalculateSkillDamageBonus(DamageEventData *dmgEvent, SpellCastData *spellData)
 {
 	if (!dmgEvent)
+		return;
+	if (!dmgEvent->source)
 		return;
 
 	switch (dmgEvent->damage_form)
@@ -286,33 +297,34 @@ void CalculateRendingAndMiscData(DamageEventData *dmgEvent)
 		break;
 	}
 
-	if (dmgEvent->isArmorRending || dmgEvent->isElementalRending)
+	if (dmgEvent->isElementalRending)
 	{
 		switch (dmgEvent->damage_form)
 		{
 		case DF_MELEE:
-			dmgEvent->rendingMultiplier = 0.25 + GetImbueMultiplier(dmgEvent->attackSkillLevel, 150, 400, 0.5); //made up formula.
+			dmgEvent->rendingMultiplier = max(GetImbueMultiplier(dmgEvent->attackSkillLevel, 0, 400, 2.5), 1.0f);
 			break;
 		case DF_MISSILE:
-			dmgEvent->rendingMultiplier = 0.25 + GetImbueMultiplier(dmgEvent->attackSkillLevel, 125, 360, 0.5); //made up formula.
-			break;
 		case DF_MAGIC:
-		{
-			bool isPvP = dmgEvent->source->AsPlayer() && dmgEvent->target->AsPlayer();
-			if (isPvP)
-				dmgEvent->rendingMultiplier = 0.25 + GetImbueMultiplier(dmgEvent->attackSkillLevel, 125, 360, 0.5); //made up formula.
-			else
-				dmgEvent->rendingMultiplier = 0.25 + GetImbueMultiplier(dmgEvent->attackSkillLevel, 150, 400, 0.5); //made up formula.
+			dmgEvent->rendingMultiplier = max(0.25 + GetImbueMultiplier(dmgEvent->attackSkillLevel, 0, 360, 2.25), 1.0f);
 			break;
-		}
 		default:
 			return;
 		}
 	}
 
-	//prepare rendingMultiplier for use.
-	if (dmgEvent->isElementalRending)
-		dmgEvent->rendingMultiplier += 1.0; //positive multiplier
-	else if (dmgEvent->isArmorRending)
-		dmgEvent->rendingMultiplier = 1.0 - dmgEvent->rendingMultiplier; //negative multiplier
+	if (dmgEvent->isArmorRending)
+	{
+		switch (dmgEvent->damage_form)
+		{
+		case DF_MELEE:
+			dmgEvent->armorRendingMultiplier = 1.0 / max(GetImbueMultiplier(dmgEvent->attackSkillLevel, 0, 400, 2.5), 1.0f);
+		case DF_MISSILE:
+			dmgEvent->armorRendingMultiplier = 1.0 / max(0.25 + GetImbueMultiplier(dmgEvent->attackSkillLevel, 0, 360, 2.25), 1.0f);
+			break;
+		case DF_MAGIC:
+		default:
+			return;
+		}
+	}
 }

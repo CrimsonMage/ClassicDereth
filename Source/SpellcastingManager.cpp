@@ -1043,6 +1043,22 @@ int CSpellcastingManager::LaunchSpellEffect()
 					// portal bitmask, 0x10 = cannot be summoned
 					// portal bitmask, 0x20 = cannot be linked/recalled
 
+					int minLevel = pTarget->InqIntQuality(MIN_LEVEL_INT, 0);
+					int maxLevel = pTarget->InqIntQuality(MAX_LEVEL_INT, 0);
+
+					int currentLevel = m_pWeenie->InqIntQuality(LEVEL_INT, 1);
+
+					if (minLevel && currentLevel < minLevel)
+					{
+						m_pWeenie->SendText("You are not powerful enough to tie to this portal yet.", LTT_MAGIC);
+						break;
+					}
+					else if (maxLevel && currentLevel > maxLevel)
+					{
+						m_pWeenie->SendText("You are too powerful to tie to this portal.", LTT_MAGIC);
+						break;
+					}
+
 					switch (meta->_index)
 					{
 					case 1:
@@ -1140,7 +1156,6 @@ int CSpellcastingManager::LaunchSpellEffect()
 
 				case 4: // primary portal recall
 					{
-						// TODO make sure they meet the portal requirements
 						DWORD portalDID = 0;
 						if (m_pWeenie->m_Qualities.InqDataID(LINKED_PORTAL_ONE_DID, portalDID) && portalDID != 0)
 						{
@@ -1149,6 +1164,37 @@ int CSpellcastingManager::LaunchSpellEffect()
 							if (portalDID)
 							{
 								portalDefaults = g_pWeenieFactory->GetWeenieDefaults(portalDID);
+							}
+
+							int minLevel = 0;
+							int maxLevel = 0;
+							portalDefaults->m_Qualities.InqInt(MIN_LEVEL_INT, minLevel);
+							portalDefaults->m_Qualities.InqInt(MAX_LEVEL_INT, maxLevel);
+
+							int currentLevel = m_pWeenie->InqIntQuality(LEVEL_INT, 1);
+
+							if (minLevel && currentLevel < minLevel)
+							{
+								m_pWeenie->SendText("You are not powerful enough to recall this portal yet.", LTT_MAGIC);
+								break;
+							}
+							else if (maxLevel && currentLevel > maxLevel)
+							{
+								m_pWeenie->SendText("You are too powerful to recall this portal.", LTT_MAGIC);
+								break;
+							}
+
+							std::string restriction;
+							if (portalDefaults->m_Qualities.InqString(QUEST_RESTRICTION_STRING, restriction))
+							{
+								if (CPlayerWeenie *player = m_pWeenie->AsPlayer())
+								{
+									if (!player->InqQuest(restriction.c_str()))
+									{
+										m_pWeenie->SendText("You try to recall the portal but there is no effect.", LTT_MAGIC);
+										break;
+									}
+								}
 							}
 
 							Position portalDest;
@@ -1174,7 +1220,6 @@ int CSpellcastingManager::LaunchSpellEffect()
 
 				case 5: // secondary portal recall
 					{
-						// TODO make sure they meet the portal requirements
 						DWORD portalDID = 0;
 						if (m_pWeenie->m_Qualities.InqDataID(LINKED_PORTAL_TWO_DID, portalDID) && portalDID != 0)
 						{
@@ -1183,6 +1228,37 @@ int CSpellcastingManager::LaunchSpellEffect()
 							if (portalDID)
 							{
 								portalDefaults = g_pWeenieFactory->GetWeenieDefaults(portalDID);
+							}
+
+							int minLevel = 0;
+							int maxLevel = 0;
+							portalDefaults->m_Qualities.InqInt(MIN_LEVEL_INT, minLevel);
+							portalDefaults->m_Qualities.InqInt(MAX_LEVEL_INT, maxLevel);
+
+							int currentLevel = m_pWeenie->InqIntQuality(LEVEL_INT, 1);
+
+							if (minLevel && currentLevel < minLevel)
+							{
+								m_pWeenie->SendText("You are not powerful enough to recall this portal yet.", LTT_MAGIC);
+								break;
+							}
+							else if (maxLevel && currentLevel > maxLevel)
+							{
+								m_pWeenie->SendText("You are too powerful to recall this portal.", LTT_MAGIC);
+								break;
+							}
+
+							std::string restriction;
+							if (portalDefaults->m_Qualities.InqString(QUEST_RESTRICTION_STRING, restriction))
+							{
+								if (CPlayerWeenie *player = m_pWeenie->AsPlayer())
+								{
+									if (!player->InqQuest(restriction.c_str()))
+									{
+										m_pWeenie->SendText("You try to recall the portal but there is no effect.", LTT_MAGIC);
+										break;
+									}
+								}
 							}
 
 							Position portalDest;
@@ -1278,6 +1354,12 @@ int CSpellcastingManager::LaunchSpellEffect()
 						// You cast Impenetrability III on Pathwarden Robe, surpassing Impenetrability II
 
 						CWeenieObject *topLevelOwner = target->GetWorldTopLevelOwner();
+
+						if (target->InqIntQuality(MAX_STACK_SIZE_INT, 1) > 1) //do not allow enchanting stackable items(ammunition)
+						{
+							m_pWeenie->SendText(csprintf("The %s can't be enchanted.", target->GetName().c_str()), LTT_MAGIC);
+							continue;
+						}
 
 						bool bAlreadyExisted = false;
 						if (target->m_Qualities._enchantment_reg && target->m_Qualities._enchantment_reg->IsEnchanted(enchant._id))
@@ -1404,18 +1486,42 @@ int CSpellcastingManager::LaunchSpellEffect()
 
 				CWeenieDefaults *portalDefaults = NULL;
 
+				bool canFlagForQuest = false;
 				if (portalDID)
 				{
 					portalDefaults = g_pWeenieFactory->GetWeenieDefaults(portalDID);
 
-					if ((portalDefaults->m_Qualities.GetInt(PORTAL_BITMASK_INT, 0) & 0x10) && m_pWeenie->AsPlayer())
-					{
-						m_pWeenie->SendText("That portal may not be summoned.", LTT_MAGIC);
-						break;
-					}
-				}
+					int minLevel = 0;
+					int maxLevel = 0;
+					portalDefaults->m_Qualities.InqInt(MIN_LEVEL_INT, minLevel);
+					portalDefaults->m_Qualities.InqInt(MAX_LEVEL_INT, maxLevel);
 
-				CWeenieObject *weenie = g_pWeenieFactory->CreateWeenieByClassID(W_PORTALGATEWAY_CLASS, &spawnPos, false);
+					if (m_pWeenie->AsPlayer())
+					{
+						int currentLevel = m_pWeenie->InqIntQuality(LEVEL_INT, 1);
+
+						if (minLevel && currentLevel < minLevel)
+						{
+							m_pWeenie->SendText("You are not powerful enough to summon this portal yet.", LTT_MAGIC);
+							break;
+						}
+						else if (maxLevel && currentLevel > maxLevel)
+						{
+							m_pWeenie->SendText("You are too powerful to summon this portal.", LTT_MAGIC);
+							break;
+						}
+
+						if ((portalDefaults->m_Qualities.GetInt(PORTAL_BITMASK_INT, 0) & 0x10))
+						{
+							m_pWeenie->SendText("That portal may not be summoned.", LTT_MAGIC);
+							break;
+						}
+					}
+					else
+						canFlagForQuest = true;
+				}
+				
+				CWeenieObject *weenie =  g_pWeenieFactory->CreateWeenieByClassID(W_PORTALGATEWAY_CLASS, &spawnPos, false);
 
 				if (weenie)
 				{
@@ -1431,6 +1537,9 @@ int CSpellcastingManager::LaunchSpellEffect()
 						weenie->CopyIntStat(MIN_LEVEL_INT, &portalDefaults->m_Qualities);
 						weenie->CopyIntStat(MAX_LEVEL_INT, &portalDefaults->m_Qualities);
 						weenie->CopyIntStat(PORTAL_BITMASK_INT, &portalDefaults->m_Qualities);
+						weenie->CopyStringStat(QUEST_RESTRICTION_STRING, &portalDefaults->m_Qualities);
+						if(canFlagForQuest)
+							weenie->CopyStringStat(QUEST_STRING, &portalDefaults->m_Qualities);
 					}
 					else
 					{
@@ -1826,6 +1935,15 @@ bool CSpellcastingManager::AdjustVital(CWeenieObject *target)
 	double preVarianceDamage = boostMax;
 	double damageOrHealAmount = Random::RollDice(boostMin, boostMax);
 
+	CWeenieObject *wand = g_pWorld->FindObject(m_SpellCastData.wand_id);
+	if (wand)
+	{
+		double elementalDamageMod = wand->InqDamageType() == meta->_dt ? wand->InqFloatQuality(ELEMENTAL_DAMAGE_MOD_FLOAT, 1.0) : 1.0;
+		if (m_pWeenie->AsPlayer() && target->AsPlayer()) //pvp
+			elementalDamageMod = ((elementalDamageMod - 1.0) / 2.0) + 1.0;
+		damageOrHealAmount *= elementalDamageMod;
+	}
+
 	// negative spell
 	if (isDamage)
 	{
@@ -1852,7 +1970,7 @@ bool CSpellcastingManager::AdjustVital(CWeenieObject *target)
 		DamageEventData dmgEvent;
 		dmgEvent.source = m_pWeenie;
 		dmgEvent.target = target;
-		dmgEvent.weapon = g_pWorld->FindObject(m_SpellCastData.wand_id);
+		dmgEvent.weapon = wand;
 		dmgEvent.damage_form = DF_MAGIC;
 		dmgEvent.damage_type = meta->_dt;
 		dmgEvent.hit_quadrant = DAMAGE_QUADRANT::DQ_UNDEF; //should spells have hit quadrants?
